@@ -1,0 +1,35 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'xh.xianhhh.macrojava' version '2.0.0'
+}
+
+group = 'xh.xianhhh'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+}
+
+import xh.xianhhh.macro.ConstExprMode
+
+macroJava {
+    mode = ConstExprMode.SMART
+    showProgress = true
+}
+
+application {
+    mainClass = 'xh.xianhhh.Main'
+}
+
+tasks.register('verifyRuntime', JavaExec) {
+    group = 'verification'
+    description = 'Runs the independent ConstExpr runtime verification.'
+    dependsOn tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = application.mainClass
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyRuntime')
+}
