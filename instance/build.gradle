@@ -14,8 +14,9 @@ repositories {
 import xh.xianhhh.macro.ConstExprMode
 
 macroJava {
-    mode = ConstExprMode.SMART
-    showProgress = true
+    mode = ConstExprMode.TAG
+    checkLegit = false
+    showProgress = false
 }
 
 application {
