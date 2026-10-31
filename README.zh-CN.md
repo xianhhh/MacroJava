@@ -110,6 +110,28 @@ final class BuildValues {
 
 ## 常量传播
 
+SMART 模式会直接折叠常量实参的 `Math`、`StrictMath` 标量数值方法（`random()` 除外），包括 `sin`、`fma`、`copySign` 等浮点方法。输出使用原始 `float`/`double` 常量位模式，保留负零和编译时计算得到的精度；`Math` 的平台相关结果以构建所用 JDK 为准。编译类路径中的第三方静态数值方法也可折叠，只要其字节码仅包含纯数值运算及可递归验证的纯调用。动态实参、可能抛异常的常量调用、有副作用或无法验证的方法会保留运行时调用。对于 `org.joml` 等库，这覆盖满足这些条件的数学辅助方法，并不承诺折叠任意对象操作。
+
+### 参数回写注解
+
+`@In`、`@Out` 和 `@Ref` 可标记基本类型参数。`@In` 禁止方法内重新赋值；`@Ref` 读入调用者的原值，并在方法正常返回时写回最终值；`@Out` 不读取调用者的原值，必须在首次读取前赋值，而且每条正常返回路径都必须完成赋值，然后写回最终值：
+
+```java
+import xh.xianhhh.macro.In;
+import xh.xianhhh.macro.Out;
+import xh.xianhhh.macro.Ref;
+
+static boolean setAnswer(@Out int result) { result = 42; return true; }
+static void addSeven(@Ref int value) { value += 7; }
+static double twice(@In double value) { return value * 2; }
+
+int result = 0;
+boolean accepted = setAnswer(result); // accepted 为 true，result 为 42
+addSeven(result); // 转换后 result 为 49
+```
+
+目前 `@Out/@Ref` 仅支持同一源码集内的静态方法，返回类型不限，且该方法恰有一个基本类型参数；实参必须直接读取局部变量。原返回值保持可用于赋值和条件判断，回写发生在调用正常返回后。Java 源码仍要求 `@Out` 实参在调用前已初始化，但其值不会传给被调用方法。编译期处理器检查声明；字节码转换先处理 `GOTO/JUMP`，再处理参数回写，最后执行 `ConstExpr` 折叠。不支持的调用会报错。
+
 转换器会把标量字段读取和带注解的静态方法调用替换为对应类型的 JVM 常量。参数化方法只有在所有实参都能在编译期确定时才会求值。编译期数组的固定下标读取和 `length` 也可以传播。方法体可以创建对象、调用构造器和方法，以及读写实例字段，前提是项目输出或编译类路径中提供了所需的字节码。依赖类会从目录或 JAR 中按需读取，并由字节码解释器执行，不通过反射加载。
 
 例如，带参数的方法可以读取注解数组。实参为编译期值的调用点会被求值：
@@ -208,7 +230,7 @@ macroJava {
 }
 ```
 
-`enabled` 默认为 `true`，应用插件后会执行字节码转换；设为 `false` 可显式禁用。插件将 javac 输出保存在 `build/classes/java/main-raw` 和 `build/classes/java/test-raw`，并从对应的 `main-macrojava` 和 `test-macrojava` 目录提供转换后的 class。`macroJavaDryRun` 可预览主源码集的变化，不写入转换后的 class。实际构建与预览都会在 `build/reports/macrojava/` 下生成制表符分隔的大小及耗时报告。
+`enabled` 默认为 `true`，应用插件后会执行字节码转换；设为 `false` 可显式禁用。插件将 javac 输出保存在 `build/classes/java/main-raw` 和 `build/classes/java/test-raw`，并从对应的 `main-macrojava` 和 `test-macrojava` 目录提供转换后的 class。`macroJavaDryRun` 和 `macroJavaTestDryRun` 分别预览主源码集和测试源码集的变化，不写入转换后的 class。实际构建与预览都会在 `build/reports/macrojava/` 下生成制表符分隔的大小及耗时报告；测试预览报告为 `test-dry-run.tsv`。
 
 如果项目把同一 source set 的 Java 目标目录和资源目录设为同一路径（例如 Forge 开发环境中的 `build/sourcesSets/main`），插件会把转换后的 class 放入该共享目录，并在转换前执行资源复制。这样 `mods.toml` 与带 `@Mod` 注解的 class 会位于同一个 mod 根目录。
 

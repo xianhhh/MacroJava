@@ -1,6 +1,9 @@
 package xh.xianhhh.processor;
 
 import xh.xianhhh.macro.ConstExpr;
+import xh.xianhhh.macro.In;
+import xh.xianhhh.macro.Out;
+import xh.xianhhh.macro.Ref;
 
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
@@ -13,7 +16,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-@SupportedAnnotationTypes("xh.xianhhh.macro.ConstExpr")
+@SupportedAnnotationTypes({"xh.xianhhh.macro.ConstExpr", "xh.xianhhh.macro.In",
+        "xh.xianhhh.macro.Out", "xh.xianhhh.macro.Ref"})
 @SupportedOptions("xh.xianhhh.constexpr.checkLegit")
 public final class ConstExprAnnotationProcessor extends AbstractProcessor {
     @Override
@@ -23,6 +27,9 @@ public final class ConstExprAnnotationProcessor extends AbstractProcessor {
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment round) {
+        for (Element parameter : round.getElementsAnnotatedWith(In.class)) validateReferenceParameter(parameter, false);
+        for (Element parameter : round.getElementsAnnotatedWith(Out.class)) validateReferenceParameter(parameter, true);
+        for (Element parameter : round.getElementsAnnotatedWith(Ref.class)) validateReferenceParameter(parameter, true);
         for (Element element : round.getElementsAnnotatedWith(ConstExpr.class)) {
             if (element.getKind() == ElementKind.FIELD) {
                 if (!element.getModifiers().contains(Modifier.STATIC)) error(element, "@ConstExpr fields must be static.");
@@ -46,6 +53,21 @@ public final class ConstExprAnnotationProcessor extends AbstractProcessor {
             }
         }
         return false;
+    }
+
+    private void validateReferenceParameter(Element parameter, boolean writeBack) {
+        if (parameter.getKind() != ElementKind.PARAMETER || !parameter.asType().getKind().isPrimitive()) {
+            error(parameter, "@In/@Out/@Ref requires a primitive method parameter.");
+            return;
+        }
+        int markers = (parameter.getAnnotation(In.class) != null ? 1 : 0)
+                + (parameter.getAnnotation(Out.class) != null ? 1 : 0)
+                + (parameter.getAnnotation(Ref.class) != null ? 1 : 0);
+        if (markers != 1) error(parameter, "A parameter can use only one of @In, @Out, or @Ref.");
+        if (!writeBack) return;
+        ExecutableElement method = (ExecutableElement) parameter.getEnclosingElement();
+        if (!method.getModifiers().contains(Modifier.STATIC) || method.getParameters().size() != 1)
+            error(parameter, "@Out/@Ref requires a static method with exactly one primitive parameter.");
     }
 
     private void validateValue(Element element, TypeMirror type, boolean field, boolean finalField) {

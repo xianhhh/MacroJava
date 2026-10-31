@@ -62,10 +62,50 @@ final class ConstExprMethodEvaluator {
             ConstExprTransformer.registerDependencyMethod(this, key, method);
             return true;
         }
+        if (ConstExprTransformer.isSmartMode() && isPureDependencyMethod(key, new HashSet<String>())) {
+            methods.put(key, method);
+            return true;
+        }
         unannotatedCalls.add(key);
         return false;
     }
     boolean contains(MethodInsnNode call) { return contains(ConstExprTransformer.key(call.owner, call.name, call.desc)); }
+
+    private boolean isPureDependencyMethod(String key, Set<String> visiting) {
+        if (!visiting.add(key)) return false;
+        try {
+            int first = key.indexOf(':'), second = key.indexOf(':', first + 1);
+            if (first < 0 || second < 0) return false;
+            String owner = key.substring(0, first);
+            MethodNode method = resolveExecutable(owner, key.substring(first + 1, second),
+                    key.substring(second + 1), new HashSet<String>());
+            if (method == null || (method.access & (Opcodes.ACC_STATIC | Opcodes.ACC_NATIVE
+                    | Opcodes.ACC_ABSTRACT | Opcodes.ACC_SYNCHRONIZED)) != Opcodes.ACC_STATIC) return false;
+            Type result = Type.getReturnType(method.desc);
+            if (!isNumeric(result)) return false;
+            for (Type parameter : Type.getArgumentTypes(method.desc)) if (!isNumeric(parameter)) return false;
+            for (AbstractInsnNode instruction : method.instructions) {
+                int opcode = instruction.getOpcode();
+                if (instruction instanceof MethodInsnNode) {
+                    MethodInsnNode call = (MethodInsnNode) instruction;
+                    if (opcode != Opcodes.INVOKESTATIC || !ConstExprTransformer.isPureJdkCall(call)
+                            && !isPureDependencyMethod(ConstExprTransformer.key(call.owner, call.name, call.desc), visiting))
+                        return false;
+                } else if (instruction instanceof FieldInsnNode || instruction instanceof InvokeDynamicInsnNode
+                        || instruction instanceof TypeInsnNode || instruction instanceof org.objectweb.asm.tree.MultiANewArrayInsnNode
+                        || opcode == Opcodes.NEWARRAY || opcode == Opcodes.ATHROW
+                        || opcode == Opcodes.MONITORENTER || opcode == Opcodes.MONITOREXIT
+                        || opcode >= Opcodes.IALOAD && opcode <= Opcodes.SASTORE) return false;
+            }
+            return true;
+        } finally {
+            visiting.remove(key);
+        }
+    }
+
+    private static boolean isNumeric(Type type) {
+        return type.getSort() >= Type.BYTE && type.getSort() <= Type.DOUBLE;
+    }
 
     /** Eagerly catches unresolved bytecode in annotated methods before call-site transformation. */
     void validateAnnotatedMethods() {

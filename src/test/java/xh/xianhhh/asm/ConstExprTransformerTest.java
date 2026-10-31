@@ -161,6 +161,9 @@ public final class ConstExprTransformerTest {
         verifyDifferentialArraysAndDryRun();
         verifyParallelProcessor();
         verifyPureJdkCalls();
+        verifyPureDependencyCalls();
+        verifyJomlMath();
+        verifyReferenceParameters();
         verifyJoinedOperands();
         verifyArrayComparisons();
         verifyLocalStackCompaction();
@@ -640,6 +643,10 @@ public final class ConstExprTransformerTest {
                 + "  public static int dynamic(int value) { return Math.max(value, 14); }\n"
                 + "  public static int overflow() { return Math.addExact(Integer.MAX_VALUE, 1); }\n"
                 + "  public static int tagged() { @ConstExpr int marker = 0; return Math.floorMod(-17, 5); }\n"
+                + "  public static double precise() { return Math.fma(1.0e16, 1.0000000000000002, -1.0e16); }\n"
+                + "  public static double negativeZero() { return Math.copySign(0.0, -1.0); }\n"
+                + "  public static double sine() { return StrictMath.sin(Math.PI / 3.0); }\n"
+                + "  public static double random() { return Math.random(); }\n"
                 + "  @ConstExpr private static int arrayElement() { return 17; }\n"
                 + "  public static String arrayText() { return java.util.Arrays.toString(new int[]{5, 11, 17, 23}); }\n"
                 + "  public static String nestedArrayText() { return java.util.Arrays.toString(new int[]{5, 11, arrayElement(), 23}); }\n"
@@ -671,6 +678,10 @@ public final class ConstExprTransformerTest {
         assertNamedCalls(node, "dynamic", "max", 1);
         assertNamedCalls(node, "overflow", "addExact", 1);
         assertNamedCalls(node, "tagged", "floorMod", 0);
+        assertNamedCalls(node, "precise", "fma", 0);
+        assertNamedCalls(node, "negativeZero", "copySign", 0);
+        assertNamedCalls(node, "sine", "sin", 0);
+        assertNamedCalls(node, "random", "random", 1);
         assertNamedCalls(node, "arrayText", "toString", 0);
         assertNamedCalls(node, "nestedArrayText", "toString", 0);
         assertNamedCalls(node, "nestedArrayText", "arrayElement", 0);
@@ -693,6 +704,11 @@ public final class ConstExprTransformerTest {
         assertResult("JDK unsigned", Integer.divideUnsigned(-1, 3), fixture.getMethod("unsigned").invoke(null));
         assertResult("JDK dynamic", 20, fixture.getMethod("dynamic", int.class).invoke(null, 20));
         assertResult("JDK tagged", Math.floorMod(-17, 5), fixture.getMethod("tagged").invoke(null));
+        assertDoubleBits("JDK fma", Math.fma(1.0e16, 1.0000000000000002, -1.0e16),
+                (Double) fixture.getMethod("precise").invoke(null));
+        assertDoubleBits("JDK signed zero", -0.0, (Double) fixture.getMethod("negativeZero").invoke(null));
+        assertDoubleBits("JDK sine", StrictMath.sin(Math.PI / 3.0),
+                (Double) fixture.getMethod("sine").invoke(null));
         assertObjectResult("literal array text", "[5, 11, 17, 23]", fixture.getMethod("arrayText").invoke(null));
         assertObjectResult("nested array text", "[5, 11, 17, 23]", fixture.getMethod("nestedArrayText").invoke(null));
         assertObjectResult("dynamic array text", "[5, 7]", fixture.getMethod("dynamicArrayText", int.class).invoke(null, 7));
@@ -727,6 +743,267 @@ public final class ConstExprTransformerTest {
             if (previousMode == null) System.clearProperty("xh.xianhhh.constexpr.mode");
             else System.setProperty("xh.xianhhh.constexpr.mode", previousMode);
         }
+    }
+
+    private static void verifyPureDependencyCalls() throws Exception {
+        Path directory = Files.createTempDirectory("constexpr-pure-dependency-test");
+        Path dependency = directory.resolve("thirdparty/Numeric.java");
+        Files.createDirectories(dependency.getParent());
+        Files.write(dependency, ("package thirdparty; public final class Numeric {\n"
+                + "  public static double curve(double x) { return Math.fma(x, 0.5, -0.0); }\n"
+                + "  public static int effect(int x) { System.setProperty(\"macrojava.test.effect\", \"yes\"); return x; }\n"
+                + "}\n").getBytes(StandardCharsets.UTF_8));
+        Path caller = directory.resolve("DependencyNumericCalls.java");
+        Files.write(caller, ("public class DependencyNumericCalls {\n"
+                + "  public static double folded() { return thirdparty.Numeric.curve(0.1); }\n"
+                + "  public static int preserved() { return thirdparty.Numeric.effect(3); }\n"
+                + "}\n").getBytes(StandardCharsets.UTF_8));
+        int status = ToolProvider.getSystemJavaCompiler().run(null, null, null, "-proc:none", "-d",
+                directory.toString(), dependency.toString(), caller.toString());
+        if (status != 0) throw new AssertionError("numeric dependency fixture compilation failed: " + status);
+        byte[] input = Files.readAllBytes(directory.resolve("DependencyNumericCalls.class"));
+        ConstExprTransformer.preScan(Collections.singletonList(input), Collections.singletonList(directory), true);
+        byte[] output;
+        try {
+            output = new ConstExprTransformer().transform(input);
+        } finally {
+            ConstExprTransformer.clear();
+        }
+        ClassNode node = new ClassNode();
+        new ClassReader(output).accept(node, 0);
+        assertNamedCalls(node, "folded", "curve", 0);
+        assertNamedCalls(node, "preserved", "effect", 1);
+        Class<?> fixture = new ClassLoader(ConstExprTransformerTest.class.getClassLoader()) {
+            Class<?> define() { return defineClass("DependencyNumericCalls", output, 0, output.length); }
+        }.define();
+        assertDoubleBits("dependency double", Math.fma(0.1, 0.5, -0.0),
+                (Double) fixture.getMethod("folded").invoke(null));
+    }
+
+    private static void verifyJomlMath() throws Exception {
+        Path directory = Files.createTempDirectory("constexpr-joml-test");
+        Path source = directory.resolve("JomlMathCalls.java");
+        Files.write(source, ("public class JomlMathCalls {\n"
+                + "  public static double squareRoot() { return org.joml.Math.sqrt(2.0); }\n"
+                + "  public static double inverseRoot() { return org.joml.Math.invsqrt(4.0); }\n"
+                + "  public static double configurable() { return org.joml.Math.sin(0.5); }\n"
+                + "}\n").getBytes(StandardCharsets.UTF_8));
+        int status = ToolProvider.getSystemJavaCompiler().run(null, null, null, "-proc:none", "-classpath",
+                System.getProperty("java.class.path"), "-d", directory.toString(), source.toString());
+        if (status != 0) throw new AssertionError("JOML fixture compilation failed: " + status);
+        byte[] input = Files.readAllBytes(directory.resolve("JomlMathCalls.class"));
+        Path joml = java.nio.file.Paths.get(org.joml.Math.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+        ConstExprTransformer.preScan(Collections.singletonList(input), Collections.singletonList(joml), true);
+        byte[] output;
+        try {
+            output = new ConstExprTransformer().transform(input);
+        } finally {
+            ConstExprTransformer.clear();
+        }
+        ClassNode node = new ClassNode();
+        new ClassReader(output).accept(node, 0);
+        assertNamedCalls(node, "squareRoot", "sqrt", 0);
+        assertNamedCalls(node, "inverseRoot", "invsqrt", 0);
+        assertNamedCalls(node, "configurable", "sin", 1);
+        Class<?> fixture = new ClassLoader(ConstExprTransformerTest.class.getClassLoader()) {
+            Class<?> define() { return defineClass("JomlMathCalls", output, 0, output.length); }
+        }.define();
+        assertDoubleBits("JOML sqrt", org.joml.Math.sqrt(2.0),
+                (Double) fixture.getMethod("squareRoot").invoke(null));
+        assertDoubleBits("JOML invsqrt", org.joml.Math.invsqrt(4.0),
+                (Double) fixture.getMethod("inverseRoot").invoke(null));
+    }
+
+    private static void verifyReferenceParameters() throws Exception {
+        Path directory = Files.createTempDirectory("constexpr-reference-parameters-test");
+        Path source = directory.resolve("ReferenceParameters.java");
+        Files.write(source, ("import xh.xianhhh.macro.*;\n"
+                + "public class ReferenceParameters {\n"
+                + "  static void add(@Ref int value) { value += 7; }\n"
+                + "  static void assign(@Out int value) { value = 42; }\n"
+                + "  static void sum(@Out int value) { value = 1; for (int i = 0; i < 4; i++) value += i; }\n"
+                + "  static boolean outBoolean(@Out int value) { value = 21; return true; }\n"
+                + "  static long refLong(@Ref long value) { value += 3; return value * 2; }\n"
+                + "  static double outDouble(@Out double value) { value = -0.0; return Math.PI; }\n"
+                + "  static String refString(@Ref int value) { value += 2; return \"done\"; }\n"
+                + "  static int[] refArray(@Ref int value) { value += 5; return new int[]{value}; }\n"
+                + "  static int read(@In int value) { return value + 1; }\n"
+                + "  public static int ref() { int value = 5; add(value); return value; }\n"
+                + "  public static int out() { int value = 0; assign(value); return value; }\n"
+                + "  public static int outLoop() { int value = 99; sum(value); return value; }\n"
+                + "  public static int outReturn() { int value = 99; return outBoolean(value) && value == 21 ? value : -1; }\n"
+                + "  public static long refReturn() { long value = 7; long result = refLong(value); return result + value; }\n"
+                + "  public static double doubleReturn() { double value = 99; double result = outDouble(value); return result + value; }\n"
+                + "  public static double doubleWriteback() { double value = 99; outDouble(value); return value; }\n"
+                + "  public static String objectReturn() { int value = 4; String result = refString(value); return result + value; }\n"
+                + "  public static int arrayReturn() { int value = 4; int[] result = refArray(value); return result[0] + value; }\n"
+                + "  public static int in() { return read(5); }\n"
+                + "}\n").getBytes(StandardCharsets.UTF_8));
+        int status = ToolProvider.getSystemJavaCompiler().run(null, null, null, "-processor",
+                "xh.xianhhh.processor.ConstExprAnnotationProcessor", "-classpath",
+                System.getProperty("java.class.path"), "-d", directory.toString(), source.toString());
+        if (status != 0) throw new AssertionError("reference parameter fixture compilation failed: " + status);
+        byte[] input = Files.readAllBytes(directory.resolve("ReferenceParameters.class"));
+        ConstExprTransformer.preScan(Collections.singletonList(input), Collections.<Path>emptyList(), true);
+        byte[] output;
+        try {
+            output = new ConstExprTransformer().transform(input);
+        } finally {
+            ConstExprTransformer.clear();
+        }
+        Class<?> fixture = new ClassLoader(ConstExprTransformerTest.class.getClassLoader()) {
+            Class<?> define() { return defineClass("ReferenceParameters", output, 0, output.length); }
+        }.define();
+        assertResult("@Ref writeback", 12, fixture.getMethod("ref").invoke(null));
+        assertResult("@Out writeback", 42, fixture.getMethod("out").invoke(null));
+        assertResult("@Out loop writeback", 7, fixture.getMethod("outLoop").invoke(null));
+        assertResult("@Out boolean return", 21, fixture.getMethod("outReturn").invoke(null));
+        if (!Long.valueOf(30).equals(fixture.getMethod("refReturn").invoke(null)))
+            throw new AssertionError("@Ref long return changed");
+        assertDoubleBits("@Out double return", Math.PI, (Double) fixture.getMethod("doubleReturn").invoke(null));
+        assertDoubleBits("@Out double writeback", -0.0,
+                (Double) fixture.getMethod("doubleWriteback").invoke(null));
+        assertObjectResult("@Ref object return", "done6", fixture.getMethod("objectReturn").invoke(null));
+        assertResult("@Ref array return", 18, fixture.getMethod("arrayReturn").invoke(null));
+        assertResult("@In read", 6, fixture.getMethod("in").invoke(null));
+        ClassNode referenceNode = new ClassNode();
+        new ClassReader(output).accept(referenceNode, 0);
+        MethodNode outCaller = null;
+        for (MethodNode candidate : referenceNode.methods)
+            if ("out".equals(candidate.name)) outCaller = candidate;
+        if (outCaller == null) throw new AssertionError("@Out caller missing");
+        for (AbstractInsnNode instruction : outCaller.instructions) {
+            if (!(instruction instanceof MethodInsnNode)
+                    || !"$macrojava$byref$assign".equals(((MethodInsnNode) instruction).name)) continue;
+            AbstractInsnNode argument = instruction.getPrevious();
+            while (argument != null && argument.getOpcode() < 0) argument = argument.getPrevious();
+            boolean defaultInput = false;
+            AbstractInsnNode cursor = argument;
+            for (int count = 0; count < 5 && cursor != null; ) {
+                cursor = cursor.getPrevious();
+                if (cursor == null || cursor.getOpcode() < 0) continue;
+                count++;
+                if (cursor.getOpcode() == Opcodes.ILOAD) break;
+                if (cursor.getOpcode() == Opcodes.ICONST_0) defaultInput = true;
+            }
+            if (argument == null || argument.getOpcode() != Opcodes.ALOAD || !defaultInput)
+                throw new AssertionError("@Out still passes the caller's initial value");
+        }
+
+        Path callee = directory.resolve("ReferenceCallee.java");
+        Path caller = directory.resolve("ReferenceCaller.java");
+        Files.write(callee, ("import xh.xianhhh.macro.Ref;\n"
+                + "public class ReferenceCallee { public static void add(@Ref long value) { value += 9; } }\n")
+                .getBytes(StandardCharsets.UTF_8));
+        Files.write(caller, ("public class ReferenceCaller {\n"
+                + "  public static long run() { long value = 13; ReferenceCallee.add(value); return value; }\n"
+                + "}\n").getBytes(StandardCharsets.UTF_8));
+        status = ToolProvider.getSystemJavaCompiler().run(null, null, null, "-proc:none", "-classpath",
+                System.getProperty("java.class.path"), "-d", directory.toString(), callee.toString(), caller.toString());
+        if (status != 0) throw new AssertionError("cross-class reference fixture compilation failed: " + status);
+        byte[] calleeInput = Files.readAllBytes(directory.resolve("ReferenceCallee.class"));
+        byte[] callerInput = Files.readAllBytes(directory.resolve("ReferenceCaller.class"));
+        ConstExprTransformer.preScan(java.util.Arrays.asList(calleeInput, callerInput), Collections.<Path>emptyList(), true);
+        byte[] calleeOutput, callerOutput;
+        try {
+            ConstExprTransformer transformer = new ConstExprTransformer();
+            calleeOutput = transformer.transform(calleeInput);
+            callerOutput = transformer.transform(callerInput);
+        } finally {
+            ConstExprTransformer.clear();
+        }
+
+        for (String invalidBody : new String[] {
+                "int previous = value; value = previous + 1;",
+                "if (System.nanoTime() > 0) value = 1;"}) {
+            Path badOut = directory.resolve("InvalidOutBody.java");
+            Files.write(badOut, ("import xh.xianhhh.macro.Out;\n"
+                    + "public class InvalidOutBody { static void assign(@Out int value) { "
+                    + invalidBody + " } }\n").getBytes(StandardCharsets.UTF_8));
+            status = ToolProvider.getSystemJavaCompiler().run(null, null, null, "-proc:none", "-classpath",
+                    System.getProperty("java.class.path"), "-d", directory.toString(), badOut.toString());
+            if (status != 0) throw new AssertionError("invalid @Out fixture compilation failed: " + status);
+            byte[] badOutInput = Files.readAllBytes(directory.resolve("InvalidOutBody.class"));
+            ConstExprTransformer.preScan(Collections.singletonList(badOutInput), Collections.<Path>emptyList(), true);
+            try {
+                new ConstExprTransformer().transform(badOutInput);
+                throw new AssertionError("invalid @Out body was accepted: " + invalidBody);
+            } catch (ConstExprException expected) {
+                if (!expected.getMessage().startsWith("@Out ")) throw expected;
+            } finally {
+                ConstExprTransformer.clear();
+            }
+        }
+        Path invalidReturn = directory.resolve("InvalidOutReturn.java");
+        Files.write(invalidReturn, ("import xh.xianhhh.macro.Out;\n"
+                + "public class InvalidOutReturn { static boolean assign(@Out int value) { "
+                + "if (System.nanoTime() > 0) return true; value = 1; return false; } }\n")
+                .getBytes(StandardCharsets.UTF_8));
+        status = ToolProvider.getSystemJavaCompiler().run(null, null, null, "-proc:none", "-classpath",
+                System.getProperty("java.class.path"), "-d", directory.toString(), invalidReturn.toString());
+        if (status != 0) throw new AssertionError("invalid returning @Out fixture compilation failed: " + status);
+        byte[] invalidReturnInput = Files.readAllBytes(directory.resolve("InvalidOutReturn.class"));
+        ConstExprTransformer.preScan(Collections.singletonList(invalidReturnInput), Collections.<Path>emptyList(), true);
+        try {
+            new ConstExprTransformer().transform(invalidReturnInput);
+            throw new AssertionError("returning @Out without assignment was accepted");
+        } catch (ConstExprException expected) {
+            if (!expected.getMessage().contains("can return without assigning")) throw expected;
+        } finally {
+            ConstExprTransformer.clear();
+        }
+        Class<?> crossClass = new ClassLoader(ConstExprTransformerTest.class.getClassLoader()) {
+            Class<?> define() { return defineClass("ReferenceCaller", callerOutput, 0, callerOutput.length); }
+            @Override protected Class<?> findClass(String name) throws ClassNotFoundException {
+                if ("ReferenceCallee".equals(name)) return defineClass(name, calleeOutput, 0, calleeOutput.length);
+                throw new ClassNotFoundException(name);
+            }
+        }.define();
+        if (!Long.valueOf(22L).equals(crossClass.getMethod("run").invoke(null)))
+            throw new AssertionError("cross-class @Ref writeback changed");
+
+        Path invalid = directory.resolve("InvalidReferenceCall.java");
+        Files.write(invalid, ("import xh.xianhhh.macro.Out;\n"
+                + "public class InvalidReferenceCall {\n"
+                + "  static void assign(@Out int value) { value = 1; }\n"
+                + "  public static void run() { assign(0); }\n"
+                + "}\n").getBytes(StandardCharsets.UTF_8));
+        status = ToolProvider.getSystemJavaCompiler().run(null, null, null, "-proc:none", "-classpath",
+                System.getProperty("java.class.path"), "-d", directory.toString(), invalid.toString());
+        if (status != 0) throw new AssertionError("invalid reference fixture compilation failed: " + status);
+        byte[] invalidInput = Files.readAllBytes(directory.resolve("InvalidReferenceCall.class"));
+        ConstExprTransformer.preScan(Collections.singletonList(invalidInput), Collections.<Path>emptyList(), true);
+        try {
+            new ConstExprTransformer().transform(invalidInput);
+            throw new AssertionError("@Out literal argument was accepted");
+        } catch (ConstExprException expected) {
+            if (!expected.getMessage().contains("local variable argument")) throw expected;
+        } finally {
+            ConstExprTransformer.clear();
+        }
+
+        Path invalidIn = directory.resolve("InvalidInParameter.java");
+        Files.write(invalidIn, ("import xh.xianhhh.macro.In;\n"
+                + "public class InvalidInParameter { static int run(@In int value) { value++; return value; } }\n")
+                .getBytes(StandardCharsets.UTF_8));
+        status = ToolProvider.getSystemJavaCompiler().run(null, null, null, "-proc:none", "-classpath",
+                System.getProperty("java.class.path"), "-d", directory.toString(), invalidIn.toString());
+        if (status != 0) throw new AssertionError("invalid @In fixture compilation failed: " + status);
+        byte[] invalidInInput = Files.readAllBytes(directory.resolve("InvalidInParameter.class"));
+        ConstExprTransformer.preScan(Collections.singletonList(invalidInInput), Collections.<Path>emptyList(), true);
+        try {
+            new ConstExprTransformer().transform(invalidInInput);
+            throw new AssertionError("@In reassignment was accepted");
+        } catch (ConstExprException expected) {
+            if (!expected.getMessage().contains("cannot be reassigned")) throw expected;
+        } finally {
+            ConstExprTransformer.clear();
+        }
+    }
+
+    private static void assertDoubleBits(String label, double expected, double actual) {
+        if (Double.doubleToRawLongBits(expected) != Double.doubleToRawLongBits(actual))
+            throw new AssertionError(label + " changed bits: " + expected + " -> " + actual);
     }
 
     private static void verifyArrayComparisons() throws Exception {

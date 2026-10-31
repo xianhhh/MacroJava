@@ -211,10 +211,12 @@ public final class ConstExprTransformer {
         intFillMethod = null;
         base64FloatFillMethod = null;
         shareTemplateArrays = configuredBoolean(SHARE_TEMPLATE_ARRAY_PROPERTY);
-        for (MethodNode method : new ArrayList<>(node.methods)) {
-            boolean directJump = JumpTransformer.transform(node.name, method);
-            transformMethod(node, node.sourceFile, method, directJump);
-        }
+        Set<MethodNode> directJumps = Collections.newSetFromMap(new IdentityHashMap<MethodNode, Boolean>());
+        for (MethodNode method : node.methods)
+            if (JumpTransformer.transform(node.name, method)) directJumps.add(method);
+        ReferenceParameterTransformer.rewrite(node, PROJECT_CLASSES);
+        for (MethodNode method : new ArrayList<>(node.methods))
+            transformMethod(node, node.sourceFile, method, directJumps.contains(method));
         initializeShapedArrays(node);
         if (preserveReflectiveMembers) initializeReflectiveFields(node);
         node.fields.removeIf(field -> !preserveReflectiveMembers
@@ -3321,23 +3323,15 @@ public final class ConstExprTransformer {
         return after;
     }
 
-    private static boolean isPureJdkCall(MethodInsnNode call) {
+    static boolean isPureJdkCall(MethodInsnNode call) {
         String signature = call.name + call.desc;
         if ("java/lang/Math".equals(call.owner) || "java/lang/StrictMath".equals(call.owner)) {
-            switch (signature) {
-                case "abs(I)I": case "abs(J)J":
-                case "min(II)I": case "min(JJ)J": case "max(II)I": case "max(JJ)J":
-                case "floorDiv(II)I": case "floorDiv(JJ)J":
-                case "floorMod(II)I": case "floorMod(JJ)J":
-                case "addExact(II)I": case "addExact(JJ)J":
-                case "subtractExact(II)I": case "subtractExact(JJ)J":
-                case "multiplyExact(II)I": case "multiplyExact(JJ)J":
-                case "negateExact(I)I": case "negateExact(J)J":
-                case "incrementExact(I)I": case "incrementExact(J)J":
-                case "decrementExact(I)I": case "decrementExact(J)J":
-                case "toIntExact(J)I": return true;
-                default: return false;
-            }
+            if ("random".equals(call.name)) return false;
+            Type result = Type.getReturnType(call.desc);
+            if (result.getSort() < Type.BOOLEAN || result.getSort() > Type.DOUBLE) return false;
+            for (Type parameter : Type.getArgumentTypes(call.desc))
+                if (parameter.getSort() < Type.BOOLEAN || parameter.getSort() > Type.DOUBLE) return false;
+            return true;
         }
         if ("java/lang/Integer".equals(call.owner)) {
             switch (signature) {
@@ -3615,7 +3609,7 @@ public final class ConstExprTransformer {
         return CHECK_LEGIT;
     }
 
-    private static boolean isSmartMode() {
+    static boolean isSmartMode() {
         return MODE == ConstExprMode.SMART;
     }
 

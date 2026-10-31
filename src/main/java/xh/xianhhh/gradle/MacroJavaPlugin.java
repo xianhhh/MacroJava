@@ -40,6 +40,7 @@ public final class MacroJavaPlugin implements Plugin<Project> {
         ((ConfigurableFileCollection) sourceSets.getByName("test").getOutput().getClassesDirs()).setFrom(
                 project.files(project.getLayout().getBuildDirectory().dir("classes/java/test-macrojava")).builtBy(testBuild));
         registerTransformation(project, "macroJavaDryRun", "Preview MacroJava changes without writing classes", compileJava, extension, "main", true);
+        registerTransformation(project, "macroJavaTestDryRun", "Preview test MacroJava changes without writing classes", compileTestJava, extension, "test", true);
         project.afterEvaluate(ignored -> {
             configureAnnotationProcessorCheck(compileJava.get(), extension);
             configureAnnotationProcessorCheck(compileTestJava.get(), extension);

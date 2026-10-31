@@ -108,6 +108,28 @@ See also the [optimization comparison](OPTIMIZATION_PASSES.md), [example project
 
 ## Constant propagation
 
+In SMART mode, constant-argument scalar numeric calls to `Math` and `StrictMath` are folded, including floating-point methods such as `sin`, `fma`, and `copySign`; `random()` remains a runtime call. Emitted `float` and `double` constants retain the computed raw bits, including negative zero. Platform-dependent `Math` results reflect the build JDK. Static numeric methods from third-party classpath entries are also folded when their bytecode consists only of numeric operations and recursively verifiable pure calls. Calls with dynamic arguments, runtime exceptions, side effects, or unverified bytecode remain at runtime. This can cover qualifying math helpers in libraries such as `org.joml`, but does not fold arbitrary object operations.
+
+### Parameter write-back annotations
+
+`@In`, `@Out`, and `@Ref` mark primitive parameters. `@In` rejects reassignment inside the method. `@Ref` receives the caller's value and writes its final value back on normal return. `@Out` does not receive the caller's value: it must be assigned before its first read and on every normal return path, then writes the result back:
+
+```java
+import xh.xianhhh.macro.In;
+import xh.xianhhh.macro.Out;
+import xh.xianhhh.macro.Ref;
+
+static boolean setAnswer(@Out int result) { result = 42; return true; }
+static void addSeven(@Ref int value) { value += 7; }
+static double twice(@In double value) { return value * 2; }
+
+int result = 0;
+boolean accepted = setAnswer(result); // accepted is true; result is 42
+addSeven(result); // result is 49 after transformation
+```
+
+Currently, `@Out/@Ref` requires a static method compiled in the same source set, with any return type and exactly one primitive parameter; the argument must directly load a local variable. The original return value remains available to assignments and conditions, and write-back occurs after a normal return. Java still requires an `@Out` argument to be initialized before the call, but its value is not passed to the callee. The annotation processor validates declarations. Bytecode transformation processes `GOTO/JUMP`, then parameter write-back, then `ConstExpr` folding. Unsupported calls fail with a diagnostic.
+
 The transformer replaces scalar field reads and annotated static calls with typed JVM constants. Calls with parameters are evaluated when every argument is known at compile time. Fixed-index array reads and `length` can also propagate. Evaluated methods may construct objects, call methods, and access instance fields when the required bytecode is available in project output or the compile classpath. Dependency bytecode is read from directories or JARs and interpreted without reflective loading.
 
 ```java
@@ -192,7 +214,7 @@ macroJava {
 }
 ```
 
-`enabled` defaults to `true`; set it to `false` to disable transformation. Raw javac output goes to `build/classes/java/main-raw` and `test-raw`, while transformed classes are exposed from `main-macrojava` and `test-macrojava`. `macroJavaDryRun` previews the main source set without writing transformed classes. Builds and previews write tab-separated size and timing reports under `build/reports/macrojava/`. When a source set shares its Java and resources output directory (for example a Forge mod root), the plugin writes transformed classes there after copying resources.
+`enabled` defaults to `true`; set it to `false` to disable transformation. Raw javac output goes to `build/classes/java/main-raw` and `test-raw`, while transformed classes are exposed from `main-macrojava` and `test-macrojava`. `macroJavaDryRun` and `macroJavaTestDryRun` preview the main and test source sets respectively without writing transformed classes. Builds and previews write tab-separated size and timing reports under `build/reports/macrojava/`; the test preview report is `test-dry-run.tsv`. When a source set shares its Java and resources output directory (for example a Forge mod root), the plugin writes transformed classes there after copying resources.
 
 With `showProgress = true`, the build log shows processed classes, replaced calls and fields, instruction and branch count changes, and removed members. Repeated replacements are grouped as `xN`; parallel logs include worker IDs. Pass `--progress` when calling the processor directly. Report columns `poolBefore` and `poolAfter` count constant-pool entries before and after transformation.
 

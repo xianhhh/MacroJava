@@ -63,6 +63,8 @@ final class ConstExprJdkInvoker {
     }
 
     private static boolean isEligible(String owner, String name) {
+        if (("java/lang/Math".equals(owner) || "java/lang/StrictMath".equals(owner))
+                && "random".equals(name)) return false;
         return owner.startsWith("java/") && !owner.startsWith("java/lang/System")
                 && !owner.startsWith("java/lang/Runtime") && !owner.startsWith("java/lang/Thread")
                 && !owner.startsWith("java/lang/Process") && !owner.startsWith("java/lang/ClassLoader")
